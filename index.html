@@ -1,0 +1,732 @@
+<!doctype html>
+<!--
+  Kevin — AI Receptionist Dashboard (Single-file)
+
+  Setup Instructions:
+  1. Replace the placeholders `SUPABASE_URL` and `SUPABASE_ANON_KEY` below with
+     your Supabase project's REST API URL and anon key.
+     - Supabase REST base looks like: https://your-project-ref.supabase.co
+     - The REST endpoints used are of the form: `${SUPABASE_URL}/rest/v1/<table>`
+  2. Open this file directly in a browser. No build step required.
+  3. To test without Supabase, the file includes a `useSampleData` flag and
+     sample data structures in the comments below.
+
+  Where to find credentials:
+  - Supabase URL: Project settings -> API -> Project URL
+  - Anon key: Project settings -> API -> anon public key
+
+  API endpoints used (Supabase REST / PostgREST):
+  - /rest/v1/calls
+  - /rest/v1/callers
+  - /rest/v1/appointments
+  - /rest/v1/call_tool_usage
+  - /rest/v1/system_errors
+
+  Sample data structure (for testing):
+  - calls: [{id, caller_id, client_id, started_at, ended_at, duration_seconds, language_detected, call_status, success_evaluation, recording_url}]
+  - callers: [{id, phone_number, name, call_count, first_call_at, last_call_at}]
+  - appointments: [{id, call_id, caller_id, scheduled_start, scheduled_end, status, cancellation_reason}]
+  - call_tool_usage: [{id, call_id, tool_name, tool_action, input_params, output_result, executed_at}]
+  - system_errors: [{id, workflow_name, error_message, error_type, occurred_at, resolved}]
+
+  Notes on Supabase REST filtering used in this file:
+  - Date range filtering uses ISO timestamps and PostgREST `gte` / `lt` operators.
+  - Sorting uses `order=column.desc` or `.asc`.
+  - `select=*` fetches all columns; `select=col,relcol(*)` fetches relationships when
+    foreign tables are configured in Supabase. If relationships are not configured,
+    we fetch related records separately.
+
+  This single-file dashboard auto-refreshes every 30 seconds and uses Chart.js
+  (CDN) for charts. Colors: primary blue `#2563eb`, positive green `#10b981`.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kevin — AI Receptionist Dashboard</title>
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=" />
+    <style>
+      /* Minimal, clean responsive styling */
+      :root{
+        --bg: #ffffff;
+        --muted:#6b7280;
+        --primary: #2563eb; /* blue */
+        --accent: #10b981; /* green */
+        --danger: #dc2626; /* red */
+        --card-shadow: 0 6px 18px rgba(15,23,42,0.06);
+        --glass: rgba(37,99,235,0.06);
+        --max-width: 1200px;
+        --gap: 16px;
+      }
+      html,body{height:100%;}
+      body{
+        margin:0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+        background:var(--bg);
+        color:#0f172a;
+        -webkit-font-smoothing:antialiased;
+      }
+      .container{
+        max-width:var(--max-width);
+        margin:24px auto;
+        padding:0 20px 60px;
+      }
+      header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+      h1{font-size:20px;margin:0}
+      .meta{color:var(--muted);font-size:13px}
+      .grid{
+        display:grid;
+        grid-template-columns:repeat(12,1fr);
+        gap:var(--gap);
+      }
+      .card{background:white;border-radius:10px;padding:14px;box-shadow:var(--card-shadow)}
+      /* layout helpers */
+      .col-span-4{grid-column:span 4}
+      .col-span-6{grid-column:span 6}
+      .col-span-8{grid-column:span 8}
+      .col-span-12{grid-column:span 12}
+      .flex{display:flex}
+      .items-center{align-items:center}
+      .justify-between{justify-content:space-between}
+      .mb-8{margin-bottom:8px}
+      .muted{color:var(--muted)}
+      .badge{background:var(--glass);color:var(--primary);padding:6px 10px;border-radius:999px;font-weight:600;font-size:13px}
+      table{width:100%;border-collapse:collapse}
+      th,td{padding:8px 6px;text-align:left;font-size:13px}
+      th{color:var(--muted);font-weight:600;border-bottom:1px solid #f3f4f6}
+      tr:hover td{background:#fbfdff}
+      .status-scheduled{color:#2563eb;font-weight:600}
+      .status-completed{color:#10b981;font-weight:600}
+      .status-cancelled{color:#6b7280;font-weight:600}
+      .small{font-size:12px}
+      .loading{color:var(--muted);font-weight:600}
+      .alert{padding:10px;border-radius:8px;background:#fff7f7;color:var(--danger);border:1px solid rgba(220,38,38,0.08)}
+      /* responsive */
+      @media (max-width:900px){
+        .col-span-4,.col-span-6,.col-span-8{grid-column:span 12}
+        header{flex-direction:column;align-items:flex-start;gap:8px}
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <div>
+          <h1>Kevin — AI Receptionist Dashboard</h1>
+          <div class="meta">Apex Construction Group — Operational visibility for calls & appointments</div>
+        </div>
+        <div class="flex items-center" style="gap:12px">
+          <div id="last-updated" class="muted small">Last updated: --:--:--</div>
+          <div class="badge">Auto-refresh: 30s</div>
+        </div>
+      </header>
+
+      <div id="alerts"></div>
+
+      <section class="grid" style="margin-top:12px;">
+        <!-- Priority Widgets: Left 8, Right 4 -->
+        <div class="card col-span-8">
+          <div class="flex justify-between mb-8">
+            <div><strong>Caller Insights / Hot Leads</strong><div class="muted small">Recent, repeat, follow-ups & VIPs</div></div>
+            <div class="small muted">Showing last 5 calls</div>
+          </div>
+          <div id="caller-insights">
+            <div id="recent-calls-container" class="mb-8"></div>
+            <div id="repeat-callers" class="mb-8"></div>
+            <div id="follow-ups" class="mb-8"></div>
+            <div id="vip-callers"></div>
+          </div>
+        </div>
+
+        <div class="card col-span-4">
+          <div class="flex justify-between mb-4">
+            <div><strong>Today's Appointments</strong><div class="muted small">Quick view</div></div>
+            <div id="appointments-count" class="muted small">--</div>
+          </div>
+          <div id="next-appointment" class="mb-4 small muted">Next: --</div>
+          <div id="appointments-table-container"></div>
+        </div>
+
+        <!-- Weekly performance -->
+        <div class="card col-span-4">
+          <strong>Weekly Performance</strong>
+          <div class="muted small mb-8">Calls & conversions this week</div>
+          <div style="display:flex;gap:12px;align-items:center">
+            <div>
+              <div class="muted small">Total Calls</div>
+              <div id="calls-this-week" style="font-size:20px;font-weight:700">--</div>
+            </div>
+            <div>
+              <div class="muted small">Conversion Rate</div>
+              <div id="conversion-rate" style="font-size:20px;font-weight:700;color:var(--primary)">--</div>
+            </div>
+            <div>
+              <div class="muted small">Change vs Last Week</div>
+              <div id="weekly-change" style="font-size:16px">--</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Call volume chart -->
+        <div class="card col-span-8">
+          <strong>Call Volume (Last 7 Days)</strong>
+          <canvas id="callVolumeChart" style="max-height:260px;margin-top:8px"></canvas>
+        </div>
+
+        <!-- Conversion funnel chart -->
+        <div class="card col-span-4">
+          <strong>Conversion Funnel</strong>
+          <canvas id="funnelChart" style="max-height:220px;margin-top:8px"></canvas>
+        </div>
+
+        <!-- Today's schedule table (detailed) -->
+        <div class="card col-span-12">
+          <strong>Today's Schedule</strong>
+          <div class="muted small">Appointments scheduled for today</div>
+          <div id="today-schedule" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Top Callers -->
+        <div class="card col-span-6">
+          <strong>Top Callers</strong>
+          <div class="muted small">Top 5 by call count</div>
+          <div id="top-callers" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Tool Performance -->
+        <div class="card col-span-6">
+          <strong>Tool Performance (7 days)</strong>
+          <div class="muted small">Executions & success rates</div>
+          <div id="tool-performance" style="margin-top:8px"></div>
+        </div>
+
+        <!-- Recent Errors -->
+        <div class="card col-span-12" id="errors-card" style="display:none">
+          <strong>Recent Unresolved Errors</strong>
+          <div class="muted small">Last 10 unresolved</div>
+          <div id="recent-errors" style="margin-top:8px"></div>
+        </div>
+
+      </section>
+    </div>
+
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+      /***************************************************************************
+       * Kevin Dashboard — Single-file JavaScript
+       * - Uses Supabase REST API via fetch (no client library)
+       * - Auto-refreshes every 30 seconds
+       * - Modular widget functions; DRY fetch helper
+       ***************************************************************************/
+
+      // ============== CONFIGURATION ==============
+
+      // Load credentials from environment or use sample data.
+      // DO NOT hardcode real credentials—use .env file (ignored in .gitignore).
+      const SUPABASE_URL = window.__SUPABASE_URL__ || 'YOUR_SUPABASE_URL';
+      const SUPABASE_ANON_KEY = window.__SUPABASE_ANON_KEY__ || 'YOUR_ANON_KEY';
+      const useSampleData = true;
+
+      // Auto-refresh interval (ms)
+      const REFRESH_INTERVAL = 30_000;
+
+      // Colors
+      const COLOR_PRIMARY = '#2563eb';
+      const COLOR_POSITIVE = '#10b981';
+
+      // Simple helper to format time for "last updated"
+      function nowTimeString(){
+        const d = new Date();
+        return d.toLocaleTimeString();
+      }
+
+      // Alert display
+      function showAlert(message, type='error'){
+        const container = document.getElementById('alerts');
+        container.innerHTML = `<div class='alert' role='alert'>${escapeHtml(message)}</div>`;
+      }
+      function clearAlert(){ document.getElementById('alerts').innerHTML=''; }
+
+      // Safe text-to-HTML helper
+      function escapeHtml(text){
+        return (text+'').replace(/[&<>"'`]/g, function(s){
+          return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;","`":"&#96;"}[s];
+        });
+      }
+
+      // ============== SAMPLE DATA (for offline testing) ==============
+      // Use sample data when `useSampleData` = true; structures match schema
+      const SAMPLE = {
+        calls: [
+          {id:'c1', caller_id:'u1', started_at: new Date(Date.now()-3600*1000).toISOString(), ended_at: new Date().toISOString(), duration_seconds: 300, call_status:'completed', success_evaluation:'ok', outcome:'scheduled'},
+          {id:'c2', caller_id:'u2', started_at: new Date(Date.now()-7200*1000).toISOString(), ended_at: new Date().toISOString(), duration_seconds: 180, call_status:'completed', success_evaluation:'ok', outcome:'callback_requested'},
+          {id:'c3', caller_id:'u1', started_at: new Date().toISOString(), ended_at: new Date().toISOString(), duration_seconds: 120, call_status:'completed', success_evaluation:'ok', outcome:'inquiry'},
+          {id:'c4', caller_id:'u3', started_at: new Date(Date.now()-86400*1000).toISOString(), ended_at: new Date().toISOString(), duration_seconds: 240, call_status:'dropped', success_evaluation:'fail'},
+          {id:'c5', caller_id:'u4', started_at: new Date(Date.now()-2*86400*1000).toISOString(), ended_at: new Date().toISOString(), duration_seconds: 200, call_status:'completed', success_evaluation:'ok', outcome:'site_visit'}
+        ],
+        callers: [
+          {id:'u1', phone_number:'+254700000001', name:'John Kamau', call_count:5, last_call_at:new Date().toISOString()},
+          {id:'u2', phone_number:'+254700000002', name:'Jane Njeri', call_count:3, last_call_at:new Date().toISOString()},
+          {id:'u3', phone_number:'+254700000003', name:'Mark Otieno', call_count:2, last_call_at:new Date().toISOString()},
+          {id:'u4', phone_number:'+254700000004', name:'VIP — Sarah', call_count:9, last_call_at:new Date().toISOString()}
+        ],
+        appointments: [
+          {id:'a1', call_id:'c1', caller_id:'u1', scheduled_start: new Date(Date.now()+3600*1000).toISOString(), scheduled_end: new Date(Date.now()+7200*1000).toISOString(), status:'scheduled'},
+          {id:'a2', call_id:'c5', caller_id:'u4', scheduled_start: new Date().toISOString(), scheduled_end: new Date(Date.now()+3600*1000).toISOString(), status:'scheduled'}
+        ],
+        call_tool_usage: [
+          {id:'t1', call_id:'c1', tool_name:'transcription', tool_action:'transcribe', executed_at: new Date().toISOString(), output_result:{success:true}},
+          {id:'t2', call_id:'c2', tool_name:'sentiment', tool_action:'analyze', executed_at: new Date().toISOString(), output_result:{success:false}}
+        ],
+        system_errors: [
+          {id:'e1', workflow_name:'call_parser', error_message:'Timeout while fetching audio', error_type:'critical', occurred_at:new Date().toISOString(), resolved:false}
+        ]
+      };
+
+      // ============== FETCH HELPER ==============
+      async function supabaseGet(path, params=''){
+        // Builds a fetch request to Supabase REST endpoint.
+        // `path` is like '/rest/v1/calls'
+        // `params` is PostgREST query string like '?select=*&order=started_at.desc&limit=5'
+        if(useSampleData){
+          // Route to sample dataset for offline use
+          // Very small router: map common paths to SAMPLE
+          if(path.includes('/calls')) return SAMPLE.calls;
+          if(path.includes('/callers')) return SAMPLE.callers;
+          if(path.includes('/appointments')) return SAMPLE.appointments;
+          if(path.includes('/call_tool_usage')) return SAMPLE.call_tool_usage;
+          if(path.includes('/system_errors')) return SAMPLE.system_errors;
+          return [];
+        }
+
+        const url = `${SUPABASE_URL}${path}${params}`;
+        try{
+          const res = await fetch(url, {
+            headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+              'Accept': 'application/json'
+            }
+          });
+          if(!res.ok){
+            const text = await res.text();
+            throw new Error(`HTTP ${res.status} ${res.statusText} - ${text}`);
+          }
+          const data = await res.json();
+          return data;
+        }catch(err){
+          console.log('Fetch error', url, err);
+          throw err;
+        }
+      }
+
+      // ================== WIDGET FUNCTIONS ==================
+
+      // 1) Recent calls with caller info (last 5)
+      async function fetchRecentCalls(){
+        // Attempt to select last 5 calls ordered by started_at desc
+        // If callers relation exists in supabase, we could use select=*,callers(*)
+        // Here we fetch calls then callers for enrichment.
+        try{
+          const calls = await supabaseGet('/rest/v1/calls','?select=*&order=started_at.desc&limit=5');
+          // Enrich with caller info
+          const callerIds = Array.from(new Set(calls.map(c=>c.caller_id).filter(Boolean)));
+          let callers = [];
+          if(callerIds.length) callers = await supabaseGet('/rest/v1/callers',`?select=*&id=in.(${callerIds.join(',')})`);
+          const callerMap = new Map((callers||[]).map(c=>[c.id,c]));
+          return calls.map(c=>({ ...c, caller: callerMap.get(c.caller_id) || null }));
+        }catch(err){
+          throw new Error('Unable to load recent calls: '+err.message);
+        }
+      }
+
+      // 2) Repeat callers today: compute from calls this day
+      async function fetchRepeatCallersToday(){
+        try{
+          const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+          const todayStartISO = todayStart.toISOString();
+          const nowISO = new Date().toISOString();
+          // Fetch calls since start of day
+          const callsToday = await supabaseGet('/rest/v1/calls',`?select=*&started_at=gte.${encodeURIComponent(todayStartISO)}&started_at=lt.${encodeURIComponent(new Date(todayStart.getTime()+86400*1000).toISOString())}`);
+          const counts = {};
+          for(const c of callsToday){
+            if(!c.caller_id) continue;
+            counts[c.caller_id] = (counts[c.caller_id]||0) + 1;
+          }
+          // Return array of {caller_id, count}
+          const repeated = Object.entries(counts).filter(([id,cnt])=>cnt>1).map(([id,cnt])=>({caller_id:id,count:cnt}));
+          if(repeated.length){
+            const callerIds = repeated.map(r=>r.caller_id).join(',');
+            const callers = await supabaseGet('/rest/v1/callers',`?select=*&id=in.(${callerIds})`);
+            const map = new Map((callers||[]).map(c=>[c.id,c]));
+            return repeated.map(r=>({...r, caller:map.get(r.caller_id)}));
+          }
+          return [];
+        }catch(err){
+          throw new Error('Unable to load repeat callers: '+err.message);
+        }
+      }
+
+      // 3) Callbacks needed (outcome='callback_requested')
+      async function fetchCallbacksNeeded(){
+        try{
+          // `outcome` is not guaranteed in schema; we attempt filter as defined in requirements.
+          const callbacks = await supabaseGet('/rest/v1/calls','?select=*&outcome=eq.callback_requested&order=started_at.desc');
+          // Enrich callers
+          const callerIds = Array.from(new Set(callbacks.map(c=>c.caller_id).filter(Boolean)));
+          let callers = [];
+          if(callerIds.length) callers = await supabaseGet('/rest/v1/callers',`?select=*&id=in.(${callerIds.join(',')})`);
+          const callerMap = new Map((callers||[]).map(c=>[c.id,c]));
+          return callbacks.map(c=>({...c, caller:callerMap.get(c.caller_id)}));
+        }catch(err){
+          // If the field doesn't exist, supabase will return 400; degrade gracefully
+          console.log('Callbacks fetch error (maybe outcome field missing):', err.message);
+          return [];
+        }
+      }
+
+      // 4) Today's appointments
+      async function fetchAppointmentsToday(){
+        try{
+          const today = new Date();
+          const start = new Date(today.setHours(0,0,0,0)).toISOString();
+          const end = new Date(new Date(start).getTime()+86400*1000).toISOString();
+          // Select appointments that start >= today's 00:00 and < tomorrow
+          const appointments = await supabaseGet('/rest/v1/appointments',`?select=*&scheduled_start=gte.${encodeURIComponent(start)}&scheduled_start=lt.${encodeURIComponent(end)}&order=scheduled_start.asc`);
+          // Enrich with callers
+          const callerIds = Array.from(new Set((appointments||[]).map(a=>a.caller_id).filter(Boolean)));
+          let callers = [];
+          if(callerIds.length) callers = await supabaseGet('/rest/v1/callers',`?select=*&id=in.(${callerIds.join(',')})`);
+          const callerMap = new Map((callers||[]).map(c=>[c.id,c]));
+          return appointments.map(a=>({...a, caller: callerMap.get(a.caller_id)}));
+        }catch(err){
+          throw new Error('Unable to load today appointments: '+err.message);
+        }
+      }
+
+      // 5) Calls this week and conversion rate
+      async function fetchWeeklyMetrics(){
+        try{
+          const now = new Date();
+          // compute Monday of this week (assume week starts Monday)
+          const day = now.getDay(); // 0 (Sun) - 6 (Sat)
+          const diffToMon = (day + 6) % 7; // how many days since Monday
+          const monday = new Date(now.getTime() - diffToMon*86400*1000);
+          monday.setHours(0,0,0,0);
+          const mondayISO = monday.toISOString();
+          const nextMondayISO = new Date(monday.getTime()+7*86400*1000).toISOString();
+
+          const calls = await supabaseGet('/rest/v1/calls',`?select=*&started_at=gte.${encodeURIComponent(mondayISO)}&started_at=lt.${encodeURIComponent(nextMondayISO)}`);
+          // Conversion: appointments (where status = scheduled or completed) created from calls this week.
+          const appointments = await supabaseGet('/rest/v1/appointments',`?select=*&created_at=gte.${encodeURIComponent(mondayISO)}&created_at=lt.${encodeURIComponent(nextMondayISO)}`);
+          const totalCalls = (calls||[]).length;
+          const booked = (appointments||[]).filter(a=>a.status === 'scheduled' || a.status === 'completed').length;
+          const conversion = totalCalls ? (booked/totalCalls * 100) : 0;
+          return { totalCalls, booked, conversion };
+        }catch(err){
+          throw new Error('Unable to load weekly metrics: '+err.message);
+        }
+      }
+
+      // 6) Call volume last 7 days
+      async function fetchCallVolumeLast7Days(){
+        try{
+          const days = [];
+          const now = new Date();
+          for(let i=6;i>=0;i--){
+            const d = new Date(now.getFullYear(), now.getMonth(), now.getDate()-i);
+            const start = new Date(d); start.setHours(0,0,0,0);
+            const end = new Date(start.getTime()+86400*1000);
+            days.push({label: start.toLocaleDateString(undefined,{weekday:'short'}), start: start.toISOString(), end: end.toISOString()});
+          }
+          const counts = [];
+          for(const day of days){
+            const cs = await supabaseGet('/rest/v1/calls',`?select=*&started_at=gte.${encodeURIComponent(day.start)}&started_at=lt.${encodeURIComponent(day.end)}`);
+            counts.push((cs||[]).length);
+          }
+          return { labels: days.map(d=>d.label), counts };
+        }catch(err){
+          throw new Error('Unable to load call volume: '+err.message);
+        }
+      }
+
+      // 7) Top callers
+      async function fetchTopCallers(){
+        try{
+          // We attempt to fetch callers ordered by call_count desc
+          const callers = await supabaseGet('/rest/v1/callers','?select=*&order=call_count.desc&limit=5');
+          return callers;
+        }catch(err){
+          throw new Error('Unable to load top callers: '+err.message);
+        }
+      }
+
+      // 8) Tool performance last 7 days
+      async function fetchToolPerformance(){
+        try{
+          const since = new Date(Date.now() - 7*86400*1000).toISOString();
+          const usage = await supabaseGet('/rest/v1/call_tool_usage',`?select=*&executed_at=gte.${encodeURIComponent(since)}`);
+          // aggregate by tool_action
+          const map = {};
+          for(const u of (usage||[])){
+            const key = u.tool_action || u.tool_name || 'unknown';
+            const ok = u.output_result && (u.output_result.success === true || u.output_result.status === 'ok');
+            if(!map[key]) map[key] = {action:key,total:0,success:0,last:null};
+            map[key].total += 1;
+            if(ok) map[key].success +=1;
+            const t = new Date(u.executed_at || u.created_at || Date.now());
+            if(!map[key].last || t > map[key].last) map[key].last = t;
+          }
+          return Object.values(map).map(v=>({...v, last: v.last ? v.last.toISOString() : null, success_rate: v.total? (v.success/v.total*100):100}));
+        }catch(err){
+          throw new Error('Unable to load tool performance: '+err.message);
+        }
+      }
+
+      // 9) Recent unresolved errors
+      async function fetchRecentErrors(){
+        try{
+          const errors = await supabaseGet('/rest/v1/system_errors','?select=*&resolved=eq.false&order=occurred_at.desc&limit=10');
+          return errors;
+        }catch(err){
+          throw new Error('Unable to load recent errors: '+err.message);
+        }
+      }
+
+      // ================== RENDERERS ==================
+
+      async function renderCallerInsights(){
+        const container = document.getElementById('caller-insights');
+        if(!container){
+          // If the container is missing, abort gracefully and log for debugging.
+          console.warn('renderCallerInsights: container `caller-insights` not found');
+          return;
+        }
+        try{
+          // Clear existing children if present
+          container.querySelectorAll('*').forEach(n=>n.remove());
+          const recent = await fetchRecentCalls();
+
+          // Recent calls
+          const recentDiv = document.getElementById('recent-calls-container');
+          if(recentDiv){
+            recentDiv.innerHTML = `<div class='muted small'>Recent Calls</div>` +
+              `<table><thead><tr><th>Time</th><th>Caller</th><th>Phone</th><th>Duration</th></tr></thead><tbody>${recent.map(c=>`<tr><td>${new Date(c.started_at).toLocaleString()}</td><td>${escapeHtml((c.caller && c.caller.name) || '—')}</td><td>${escapeHtml((c.caller && c.caller.phone_number) || '—')}</td><td>${c.duration_seconds? c.duration_seconds+'s':'—'}</td></tr>`).join('')}</tbody></table>`;
+          } else {
+            console.warn('renderCallerInsights: `recent-calls-container` not found');
+          }
+
+          // Repeat callers today
+          const repeats = await fetchRepeatCallersToday();
+          const repeatDiv = document.getElementById('repeat-callers');
+          if(repeatDiv){
+            if(repeats.length){
+              repeatDiv.innerHTML = `<div class='muted small'>Repeat Callers Today</div>` +
+                `<ul>${repeats.map(r=>`<li><strong>${escapeHtml(r.caller?.name||r.caller_id)}</strong> — ${r.count} calls</li>`).join('')}</ul>`;
+            } else {
+              repeatDiv.innerHTML = `<div class='muted small'>No repeat callers detected today.</div>`;
+            }
+          } else {
+            console.warn('renderCallerInsights: `repeat-callers` not found');
+          }
+
+          // Follow-ups
+          const callbacks = await fetchCallbacksNeeded();
+          const followDiv = document.getElementById('follow-ups');
+          if(followDiv){
+            if(callbacks.length){
+              followDiv.innerHTML = `<div class='muted small'>Follow-up Needed</div>` +
+                `<ul>${callbacks.map(c=>`<li>${new Date(c.started_at).toLocaleTimeString()} — ${escapeHtml(c.caller?.name||c.caller_id)} ${escapeHtml(c.caller?.phone_number||'')}</li>`).join('')}</ul>`;
+            } else {
+              followDiv.innerHTML = `<div class='muted small'>No follow-ups queued.</div>`;
+            }
+          } else {
+            console.warn('renderCallerInsights: `follow-ups` not found');
+          }
+
+          // VIP callers (high call_count)
+          const callers = await fetchTopCallers();
+          const vipDiv = document.getElementById('vip-callers');
+          const vips = (callers||[]).filter(c=>c.call_count >= 5);
+          if(vipDiv){
+            if(vips.length){
+              vipDiv.innerHTML = `<div class='muted small'>VIPs</div>` +
+                `<ul>${vips.map(v=>`<li><strong>${escapeHtml(v.name||v.phone_number)}</strong> — ${v.call_count} calls</li>`).join('')}</ul>`;
+            } else {
+              vipDiv.innerHTML = `<div class='muted small'>No VIP callers detected.</div>`;
+            }
+          } else {
+            console.warn('renderCallerInsights: `vip-callers` not found');
+          }
+
+        }catch(err){
+          console.log(err);
+          showAlert(err.message);
+        }
+      }
+
+      async function renderAppointmentsCard(){
+        try{
+          const appts = await fetchAppointmentsToday();
+          document.getElementById('appointments-count').textContent = (appts||[]).length;
+          if((appts||[]).length){
+            const next = appts[0];
+            document.getElementById('next-appointment').textContent = `Next: ${new Date(next.scheduled_start).toLocaleString()} — ${escapeHtml(next.caller?.name||next.caller_id||'Unknown')}`;
+          } else {
+            document.getElementById('next-appointment').textContent = 'Next: --';
+          }
+          const container = document.getElementById('appointments-table-container');
+          if((appts||[]).length===0){ container.innerHTML = '<div class="muted small">No appointments today.</div>'; return; }
+          container.innerHTML = `<table><thead><tr><th>Time</th><th>Caller</th><th>Phone</th><th>Status</th></tr></thead><tbody>${appts.map(a=>`<tr><td>${new Date(a.scheduled_start).toLocaleTimeString()}</td><td>${escapeHtml(a.caller?.name||'—')}</td><td>${escapeHtml(a.caller?.phone_number||'—')}</td><td class='status-${a.status||'scheduled'}'>${escapeHtml(a.status||'scheduled')}</td></tr>`).join('')}</tbody></table>`;
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      async function renderWeeklyPerformance(){
+        try{
+          const metrics = await fetchWeeklyMetrics();
+          document.getElementById('calls-this-week').textContent = metrics.totalCalls || 0;
+          document.getElementById('conversion-rate').textContent = `${metrics.conversion ? metrics.conversion.toFixed(1) : 0}%`;
+          // For change vs last week we need previous week counts
+          // Simple approach: fetch previous week and compare
+          const now = new Date();
+          const day = now.getDay();
+          const diffToMon = (day + 6) % 7;
+          const thisMonday = new Date(now.getTime() - diffToMon*86400*1000); thisMonday.setHours(0,0,0,0);
+          const prevMonday = new Date(thisMonday.getTime() - 7*86400*1000);
+          const prevMondayISO = prevMonday.toISOString();
+          const thisMondayISO = thisMonday.toISOString();
+          const prevCalls = await supabaseGet('/rest/v1/calls',`?select=*&started_at=gte.${encodeURIComponent(prevMondayISO)}&started_at=lt.${encodeURIComponent(thisMondayISO)}`);
+          const prevTotal = (prevCalls||[]).length;
+          const change = prevTotal ? ((metrics.totalCalls - prevTotal)/prevTotal*100) : 0;
+          const el = document.getElementById('weekly-change');
+          const arrow = change > 0 ? '▲' : (change < 0 ? '▼' : '–');
+          el.textContent = `${arrow} ${Math.abs(change).toFixed(1)}%`;
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      let callVolumeChart, funnelChart;
+
+      async function renderCallVolumeChart(){
+        try{
+          const data = await fetchCallVolumeLast7Days();
+          const ctx = document.getElementById('callVolumeChart').getContext('2d');
+          if(callVolumeChart) callVolumeChart.destroy();
+          callVolumeChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: data.labels,
+              datasets: [{label:'Calls',data:data.counts,borderColor:COLOR_PRIMARY,backgroundColor:'rgba(37,99,235,0.08)',tension:0.3,pointRadius:4}]
+            },
+            options: {responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}
+          });
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      async function renderFunnelChart(){
+        try{
+          // We compute three bars: total calls, site_visit intent, scheduled outcome
+          const now = new Date();
+          const day = now.getDay();
+          const diffToMon = (day + 6) % 7;
+          const monday = new Date(now.getTime() - diffToMon*86400*1000); monday.setHours(0,0,0,0);
+          const mondayISO = monday.toISOString();
+          const nextMondayISO = new Date(monday.getTime()+7*86400*1000).toISOString();
+          const calls = await supabaseGet('/rest/v1/calls',`?select=*&started_at=gte.${encodeURIComponent(mondayISO)}&started_at=lt.${encodeURIComponent(nextMondayISO)}`);
+          // site_visit intent assumed to be in `intent` field or `outcome`; attempt both
+          const siteVisits = (calls||[]).filter(c=> (c.intent && c.intent === 'site_visit') || (c.outcome && c.outcome === 'site_visit')).length;
+          // scheduled outcome: calls leading to appointments; we already fetch appointments this week
+          const appointments = await supabaseGet('/rest/v1/appointments',`?select=*&created_at=gte.${encodeURIComponent(mondayISO)}&created_at=lt.${encodeURIComponent(nextMondayISO)}`);
+          const scheduled = (appointments||[]).filter(a=>a.status === 'scheduled' || a.status === 'completed').length;
+          const total = (calls||[]).length;
+
+          const ctx = document.getElementById('funnelChart').getContext('2d');
+          if(funnelChart) funnelChart.destroy();
+          funnelChart = new Chart(ctx,{
+            type:'bar',
+            data:{labels:['Total Calls','Site Visit Intent','Scheduled'],datasets:[{data:[total,siteVisits,scheduled],backgroundColor:[COLOR_PRIMARY,'#60a5fa',COLOR_POSITIVE]}]},
+            options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}
+          });
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      async function renderTopCallers(){
+        try{
+          const callers = await fetchTopCallers();
+          const el = document.getElementById('top-callers');
+          if(!(callers||[]).length) { el.innerHTML = '<div class="muted small">No callers found.</div>'; return; }
+          el.innerHTML = `<table><thead><tr><th>Name</th><th>Phone</th><th>Calls</th><th>Last Call</th></tr></thead><tbody>${callers.map(c=>`<tr><td>${escapeHtml(c.name||'—')}</td><td>${escapeHtml(c.phone_number||'—')}</td><td>${c.call_count||0}</td><td class='small muted'>${c.last_call_at? new Date(c.last_call_at).toLocaleString():'—'}</td></tr>`).join('')}</tbody></table>`;
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      async function renderToolPerformance(){
+        try{
+          const perf = await fetchToolPerformance();
+          const el = document.getElementById('tool-performance');
+          if(!perf.length) { el.innerHTML = '<div class="muted small">No tool usage in last 7 days.</div>'; return; }
+          el.innerHTML = `<table><thead><tr><th>Action</th><th>Total</th><th>Success %</th><th>Last Used</th></tr></thead><tbody>${perf.map(p=>`<tr><td>${escapeHtml(p.action)}</td><td>${p.total}</td><td style="background:${p.success_rate<95?'#fff7e6':'transparent'}">${p.success_rate.toFixed(1)}%</td><td class='small muted'>${p.last? new Date(p.last).toLocaleString():'—'}</td></tr>`).join('')}</tbody></table>`;
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      async function renderErrors(){
+        try{
+          const errs = await fetchRecentErrors();
+          const card = document.getElementById('errors-card');
+          if(!(errs||[]).length){ card.style.display='none'; return; }
+          card.style.display='block';
+          const el = document.getElementById('recent-errors');
+          el.innerHTML = `<table><thead><tr><th>Time</th><th>Workflow</th><th>Error</th><th>Severity</th></tr></thead><tbody>${errs.map(e=>`<tr><td>${new Date(e.occurred_at).toLocaleString()}</td><td>${escapeHtml(e.workflow_name||'—')}</td><td>${escapeHtml(e.error_message)}</td><td style='color:${e.error_type==='critical'? 'var(--danger)':'#f97316'}'>${escapeHtml(e.error_type||'high')}</td></tr>`).join('')}</tbody></table>`;
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      async function renderTodayScheduleDetailed(){
+        try{
+          const appts = await fetchAppointmentsToday();
+          const el = document.getElementById('today-schedule');
+          if(!appts.length) { el.innerHTML = '<div class="muted small">No scheduled appointments for today.</div>'; return; }
+          el.innerHTML = `<table><thead><tr><th>Time</th><th>Caller Name</th><th>Phone</th><th>Type</th><th>Status</th></tr></thead><tbody>${appts.map(a=>`<tr><td>${new Date(a.scheduled_start).toLocaleTimeString()}</td><td>${escapeHtml(a.caller?.name||'—')}</td><td>${escapeHtml(a.caller?.phone_number||'—')}</td><td>${escapeHtml(a.appointment_type||'—')}</td><td class='status-${a.status||'scheduled'}'>${escapeHtml(a.status||'scheduled')}</td></tr>`).join('')}</tbody></table>`;
+        }catch(err){console.log(err); showAlert(err.message)}
+      }
+
+      // ============== MAIN REFRESH ==============
+      async function loadAllData(){
+        clearAlert();
+        document.getElementById('last-updated').textContent = `Last updated: ${nowTimeString()}`;
+        try{
+          // Run renderers in parallel where possible
+          await Promise.all([
+            renderCallerInsights(),
+            renderAppointmentsCard(),
+            renderWeeklyPerformance(),
+            renderTopCallers(),
+            renderToolPerformance(),
+            renderErrors(),
+            renderTodayScheduleDetailed(),
+            renderCallVolumeChart(),
+            renderFunnelChart()
+          ]);
+        }catch(err){
+          // Each renderer also handles its own errors; the final catch ensures global visibility
+          console.log('loadAllData error', err);
+          showAlert('Some widgets failed to load. See console for details.');
+        }
+      }
+
+      // Start auto-refresh and initial load
+      (async function init(){
+        if(!useSampleData && (!SUPABASE_URL || !SUPABASE_ANON_KEY || SUPABASE_URL.includes('YOUR_SUPABASE_URL'))){
+          showAlert('Supabase credentials are placeholders. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in the top of the file to fetch live data.');
+        }
+        // Initial load
+        await loadAllData();
+        // Auto-refresh
+        setInterval(async ()=>{
+          await loadAllData();
+        }, REFRESH_INTERVAL);
+      })();
+
+      // End of script
+    </script>
+  </body>
+</html>
